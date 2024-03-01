@@ -3,7 +3,106 @@
 #include "device_launch_parameters.h"
 
 #include <stdio.h>
+#include <iostream>
 
+using std::cout;
+using std::endl;
+
+// Макросы для задания параметров теста
+#define N_CONCENTRATIONS (uint32_t)5      // Количество концентраций
+#define MM (uint32_t)10                   // Количество строк
+#define NN (uint32_t)10                   // Количество столбцов
+
+// Вспомогательные функции (тело ниже)
+void Printer(double* data);
+void Init(double *data);
+
+
+int main()
+{
+    // основные данные хранятся в трехмерном плотном массиве
+    double *data;
+    data = new double[N_CONCENTRATIONS * NN * MM];
+
+    Init(data);
+
+    Printer(data);
+
+    delete[] data;
+    return 0;
+}
+
+void Init(double* data)
+{
+    for (int i = 0; i < N_CONCENTRATIONS * NN * MM; ++i) data[i] = 0.0;
+
+    // проход по всем ячейкам
+    int* n_tmp = new int[N_CONCENTRATIONS]; // временный массив для хранения номеров концентраций в ячейке
+    for (int i = 0; i < N_CONCENTRATIONS; ++i) n_tmp[i] = -1;
+
+    for (uint32_t m = 0; m < MM; ++m)
+    {
+        for (uint32_t n = 0; n < NN; ++n)
+        {
+            // Рандомим количество веществ в ячейке (от 1 до N_CONCENTRATIONS)
+            int count = rand() % N_CONCENTRATIONS + 1;
+
+            // Генерация номеров концентраций в ячейке
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                int random;
+                while (true)
+                {
+                    bool good = true;
+                    random = rand() % N_CONCENTRATIONS;
+                    for (uint32_t j = 0; j < count; j++)
+                    {
+                        if (random == n_tmp[j]) { good = false; break; }
+                    }
+                    if (good) break;
+                }
+                n_tmp[i] = random; // сохранение рандомного вещества, которое не повторяется
+            }
+
+            for (int i = count; i < N_CONCENTRATIONS; ++i) n_tmp[i] = -1;
+
+            // Запись данных в массив
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                data[n_tmp[i] * NN * MM + m * NN + n] = 1.0 / count;
+            }
+
+            // обязательно обнулить для следующей ячейки
+            for (int i = 0; i < N_CONCENTRATIONS; ++i) n_tmp[i] = -1;
+
+        }
+    }
+
+    delete[] n_tmp;
+}
+
+void Printer(double* data)
+{
+    for (uint32_t i = 0; i < N_CONCENTRATIONS; ++i)
+    {
+        for (uint32_t m = 0; m < MM; ++m)
+        {
+            for (uint32_t n = 0; n < NN; ++n)
+            {
+                cout << data[i * NN * MM + m * NN + n] << " ";
+            }
+            cout << endl;
+        }
+        cout << endl << endl << endl;
+    }
+}
+
+
+
+
+
+
+/*
 cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size);
 
 __global__ void addKernel(int *c, const int *a, const int *b)
@@ -119,3 +218,4 @@ Error:
     
     return cudaStatus;
 }
+*/
