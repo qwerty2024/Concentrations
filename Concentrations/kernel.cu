@@ -10,37 +10,70 @@ using std::endl;
 
 // Макросы для задания параметров теста
 #define N_CONCENTRATIONS (int)5      // Количество концентраций
-#define MM (int)10                   // Количество строк
-#define NN (int)10                   // Количество столбцов
+#define MM (int)4                   // Количество строк
+#define NN (int)4                   // Количество столбцов
 
 // Вспомогательные функции (тело ниже)
 void Printer(double* data);
 void Init(double *data);
 
+__global__ void convert_to_csr(double *data, double *val, int *id, int *pos)
+{
+    pos[0] = 0;
+    int i = 0;
+    for (int m = 0; m < MM; ++m)
+    {
+        for (int n = 0; n < NN; ++n)
+        {
+            int count = 0;
+            for (int k = 0; k < N_CONCENTRATIONS; k++)
+            {
+                if (data[k * MM * NN + m * NN + n] != 0)
+                {
+                    val[i] = data[k * MM * NN + m * NN + n];
+                    id[i] = k;
+                    i++;
+                    count++;
+                }
+            }
+
+            pos[m * NN + n + 1] = pos[m * NN + n] + count;
+        }
+    }
+}
 
 int main()
 {
+    int size = N_CONCENTRATIONS * NN * MM;
     // основные данные хранятся в трехмерном плотном массиве
     double *data;
-    data = new double[N_CONCENTRATIONS * NN * MM]; // каждый слой отвечает за свое вещество
+    data = new double[size]; // каждый слой отвечает за свое вещество
+    
 
     Init(data);
 
     Printer(data);
 
+    double *d_data;
+    
+    cudaSetDevice(0);
+
+    cudaMalloc((void**)&d_data, size * sizeof(double));
+    cudaMemcpy(d_data, data, size * sizeof(double), cudaMemcpyHostToDevice);
+
+
+
     // Мысль 1. 
     // Что если хранить не double, а два int, типо мантисса и порядок?
+    //int a = (int)(0.12345678 * 1'000'000'000);
+    //int b = (int)(1.12345678 * 1'000'000'000);
+    //std::cout << a << std::endl << b << std::endl;
+    // сильно падает точность... не катит
 
 
-    // Мысль 2.
-    // 
-    //
-    //
-
-
-
+ 
     // СТРУКТУРА 1
-    // Есть односвязный список, каждый элемент которого хранит указатель на данные по конкретному веществу
+    // Есть односвязный список (можно и вектор на самом деле), каждый элемент которого хранит указатель на данные по конкретному веществу
     // Данные представлены как unordered_map<int, double>, int - номер ячейки, double - концентрация в ней
     // Теоретические плюсы: доступ, удаление, добавление в среднем за O(1)
     // Теоретические минусы: а хуй знает как поведет себя хешмапа на гпу... не понятно пока как делать копирку на гпу (мб копировать просто, а конверитровать в структуру отдельным ядром на гпу).
@@ -60,8 +93,46 @@ int main()
     // Третий массив - массив сдвига:             pos: 0,     2,                  6,   7 ...
     // Теоретические плюсы: 
     // Теоретические минусы:
-    
-    
+    int nnz = 0;
+    double *d_val;
+    int *d_id;
+    int *d_pos; // сюда бы Long long лучше
+
+    for (int i = 0; i < size; i++) // самый простой тупой способ подсчета ненудевых частей
+    {
+        if (data[i] != 0) nnz++;
+    }
+
+    cudaMalloc((void**)&d_val, nnz * sizeof(double));
+    cudaMalloc((void**)&d_id, nnz * sizeof(int));
+    cudaMalloc((void**)&d_pos, MM * NN * sizeof(int) + 1); // по количеству ячеек в сетке
+
+    convert_to_csr <<<1, 1>>> (d_data, d_val, d_id, d_pos); // чисто одно ядро делает конвертацию, конечно можно немного распараллелить, но нужно сделать доп вычисления
+
+    cudaDeviceSynchronize();
+
+    double *val = new double[nnz];
+    int *id = new int[nnz];
+    int *pos = new int[MM * NN + 1]; 
+
+    cudaMemcpy(val, d_val, nnz * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(id, d_id, nnz * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(pos, d_pos, MM * NN * sizeof(int) + 1, cudaMemcpyDeviceToHost);
+
+
+    for (int i = 0; i < nnz; i++)
+    {
+        std::cout << "[" << id[i] << "]" << val[i] << " ";
+    }
+    std::cout << std::endl;
+
+    for (int i = 0; i < MM * NN + 1; i++)
+    {
+        std::cout << pos[i] << " ";
+    }
+    std::cout << std::endl;
+
+
     // СТРУКТУРА 4
     // Таблица односвязных списков.
     // Каждая ячейка - односвязный список на пары <номер вещества, его концентрация>
