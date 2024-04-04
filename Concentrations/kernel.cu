@@ -9,13 +9,65 @@ using std::cout;
 using std::endl;
 
 // Макросы для задания параметров теста
-#define N_CONCENTRATIONS (int)5      // Количество концентраций
-#define MM (int)4                   // Количество строк
-#define NN (int)4                   // Количество столбцов
+#define N_CONCENTRATIONS (int)5     // Количество концентраций
+#define MM (int)10                   // Количество строк
+#define NN (int)10                  // Количество столбцов
+
+#define THREAD_IN_BLOCK 256
 
 // Вспомогательные функции (тело ниже)
 void Printer(double* data);
 void Init(double *data);
+
+__global__ void test_default(double *data, double *data_new)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (idx < NN * MM)
+    {
+        for (int i = 0; i < N_CONCENTRATIONS; i++)
+        {
+            int offset = i * NN * MM;
+
+            int left = idx - 1 + offset;
+            int right = idx + 1 + offset;
+            int up = idx - MM + offset;
+            int down = idx + MM + offset;
+
+            int count = 1;
+            double sum = data[idx + i * NN * MM];
+
+
+            if (idx % MM != 0) // лево
+            {
+                sum += data[left];
+                count++;
+            }
+
+            if (idx % MM != MM - 1) // право
+            {
+                sum += data[right];
+                count++;
+            }
+
+            if (up - offset >= MM) // верх
+            {
+                sum += data[up];
+                count++;
+            }
+
+            if (down - offset < MM * NN - MM) // низ
+            {
+                sum += data[down];
+                count++;
+            }
+
+            data_new[idx + i * NN * MM] = sum / count;
+
+            //printf("%e \n", data[idx]);
+        }
+    }
+}
 
 __global__ void convert_to_csr(double *data, double *val, int *id, int *pos)
 {
@@ -47,21 +99,35 @@ int main()
     int size = N_CONCENTRATIONS * NN * MM;
     // основные данные хранятся в трехмерном плотном массиве
     double *data;
+    double *data_new;
     data = new double[size]; // каждый слой отвечает за свое вещество
-    
+    data_new = new double[size]; // каждый слой отвечает за свое вещество
 
     Init(data);
 
     Printer(data);
 
     double *d_data;
+    double* d_data_new;
     
     cudaSetDevice(0);
 
     cudaMalloc((void**)&d_data, size * sizeof(double));
+    cudaMalloc((void**)&d_data_new, size * sizeof(double));
     cudaMemcpy(d_data, data, size * sizeof(double), cudaMemcpyHostToDevice);
 
+    for (int i = 0; i < 100; i++)
+    {
+        test_default << <THREAD_IN_BLOCK, (NN * MM + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_data, d_data_new);
+        test_default << <THREAD_IN_BLOCK, (NN * MM + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_data_new, d_data);
+    }
 
+
+    //cudaMemcpy(data_new, d_data_new, size * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
+
+    //Printer(data_new);
+    Printer(data);
 
     // Мысль 1. 
     // Что если хранить не double, а два int, типо мантисса и порядок?
@@ -120,17 +186,17 @@ int main()
     cudaMemcpy(pos, d_pos, MM * NN * sizeof(int) + 1, cudaMemcpyDeviceToHost);
 
 
-    for (int i = 0; i < nnz; i++)
-    {
-        std::cout << "[" << id[i] << "]" << val[i] << " ";
-    }
-    std::cout << std::endl;
-
-    for (int i = 0; i < MM * NN + 1; i++)
-    {
-        std::cout << pos[i] << " ";
-    }
-    std::cout << std::endl;
+    //for (int i = 0; i < nnz; i++)
+    //{
+    //    std::cout << "[" << id[i] << "]" << val[i] << " ";
+    //}
+    //std::cout << std::endl;
+    //
+    //for (int i = 0; i < MM * NN + 1; i++)
+    //{
+    //    std::cout << pos[i] << " ";
+    //}
+    //std::cout << std::endl;
 
 
     // СТРУКТУРА 4
