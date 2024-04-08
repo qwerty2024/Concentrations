@@ -13,278 +13,355 @@ using std::vector;
 using std::pair;
 using std::set;
 
+// Опции включить тесты
+#define DEFAULT_EASY
+
 // Макросы для задания параметров теста
-#define N_CONCENTRATIONS (int)5     // Количество концентраций
-#define MM (int)4                   // Количество строк
-#define NN (int)4                   // Количество столбцов
-#define DISTRIBUTION_COEFF 0.01     // Если столько есть вещества в ячейке, то оно сдетанирует соседнюю ячекйку
-#define TRANSFER_COEFF 0.99         // Сколько процетов вещества перенесется в соседнюю ячейку
+#define N_CONCENTRATIONS (int)2     // Количество концентраций
+#define MM (int)5                   // Количество строк
+#define NN (int)5                   // Количество столбцов
+#define N_STEP 15                   // Сколько раз повторить распространение волн
+#define DISTRIBUTION_COEFF 0.02      // Если столько есть вещества в ячейке, то оно сдетанирует соседнюю ячекйку
+#define TRANSFER_COEFF 0.50         // Сколько процетов вещества перенесется в соседнюю ячейку
 
 
 #define THREAD_IN_BLOCK 256
 #define LOAD_THREAD_CSR 8      // нагрузка на нить в расчетах новой длины массива для CSR
 
+// Функции тестов
+void default_easy();
 
 // Вспомогательные функции (тело ниже)
-void Printer(double*, bool*);
-void Init(double*, bool*);
+void Printer(double*, int*);
+void Init(double*, int*);
 
-__global__ void test_default(double *data, double *data_new)
+__global__ void test_default_easy(double* data, int* status)
 {
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    int idx = blockDim.x * blockIdx.x + threadIdx.x; // номер ячейки
+    //int index = idx * N_CONCENTRATIONS; // индекс начала ячейки в глобальном массиве
 
-    if (idx < NN * MM)
+    if (idx < NN * MM) // так как нитей запускали больше, чем ячеек
     {
-        for (int i = 0; i < N_CONCENTRATIONS; i++)
+        if (status[idx] == 0) // производим расчет веществ, которые стекутся в эту ячейку от соседей
         {
-            int offset = i * NN * MM;
+            int max = 0;            // индекс самого сильного вещества
+            double max_val = 0.0;   // значение самого сильного вещества
 
-            int left = idx - 1 + offset;
-            int right = idx + 1 + offset;
-            int up = idx - MM + offset;
-            int down = idx + MM + offset;
-
-            int count = 1;
-            double sum = data[idx + i * NN * MM];
-
-
-            if (idx % MM != 0) // лево
+            if (idx % NN != 0) // если слева есть сосед, то смотрим его
             {
-                sum += data[left];
-                count++;
-            }
-
-            if (idx % MM != MM - 1) // право
-            {
-                sum += data[right];
-                count++;
-            }
-
-            if (up - offset >= MM) // верх
-            {
-                sum += data[up];
-                count++;
-            }
-
-            if (down - offset < MM * NN - MM) // низ
-            {
-                sum += data[down];
-                count++;
-            }
-
-            data_new[idx + i * NN * MM] = sum / count;
-
-            //printf("%e \n", data[idx]);
-        }
-    }
-}
-
-__global__ void csr_precount(double *val, int *id, int *pos)
-{
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-    
-    // крайняя левая и крайняя правая ячейки сетки, которые рассматривает данная нить (не превышет размер MM * NN)
-    int left = THREAD_IN_BLOCK * idx;  
-    int right = THREAD_IN_BLOCK * (idx + 1) - 1;
-
-    // не выходим за границы сетки
-    if (left >= MM * NN)
-        return;
-
-    if (right >= MM * NN)
-        right = MM * NN - 1;
-
-    __shared__ int count[THREAD_IN_BLOCK];
-
-    // нитка идет по своим ячейкам и добавляет, если нам нужно расширить память массивов
-    for (int i = 0; i <= right - left; i++)
-    {
-        int index_left = pos[left + i];
-        int index_right = pos[left + i + 1];
-
-        int consist[N_CONCENTRATIONS]; // Надеюсь он обнулен
-
-        for (int j = index_left; j < index_right; j++) // заполним вещества, которые есть в ячейке
-        {
-            consist[id[j]] = 1;
-        }
-
-        if (left + i % MM != 0) // проверка левого соседа
-        {
-            for (int j = pos[left + i - 1]; j < pos[left + i]; j++)
-            {
-                if (consist[id[j]] != 1)
-                    consist[id[j]] = -1;
-            }
-        }
-
-        if (left + i % MM != MM - 1) // проверка правого соседа
-        {
-            for (int j = pos[left + i]; j < pos[left + i + 1]; j++)
-            {
-                if (consist[id[j]] != 1)
-                    consist[id[j]] = -1;
-            }
-        }
-
-        if (left + i >= MM) // проверка верхнего соседа
-        {
-            for (int j = pos[left + i - MM]; j < pos[left + i + 1 - MM]; j++)
-            {
-                if (consist[id[j]] != 1)
-                    consist[id[j]] = -1;
-            }
-        }
-
-        if (left + i < MM * NN - MM) // проверка нижнего соседа
-        {
-            for (int j = pos[left + i + MM]; j < pos[left + i + 1 + MM]; j++)
-            {
-                if (consist[id[j]] != 1)
-                    consist[id[j]] = -1;
-            }
-        }
-
-        // подсчитать все -1 и плюсануть счетчик нити
-        for (int j = 0; j < N_CONCENTRATIONS; j++)
-        {
-            if (consist[j] == -1)
-                count[threadIdx.x]++;
-        }
-    }
-
-    __syncthreads();
-    // методом сдваивания найти для этого запуска ядра количество увеличения памяти
-    int res = 0;
-
-    count[threadIdx.x];
-
-    for (int s = 1; s < blockDim.x; s *= 2) 
-    {
-        if (threadIdx.x % (2 * s) == 0) 
-        {
-            count[threadIdx.x] += count[threadIdx.x + s];
-        }
-
-        __syncthreads();
-    }
-
-    //if (threadIdx.x == 0) output[blockIdx.x] = count[0];
-}
-
-__global__ void test_csr(double* data, double* data_new)
-{
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-
-    if (idx < NN * MM)
-    {
-        for (int i = 0; i < N_CONCENTRATIONS; i++)
-        {
-            int offset = i * NN * MM;
-
-            int left = idx - 1 + offset;
-            int right = idx + 1 + offset;
-            int up = idx - MM + offset;
-            int down = idx + MM + offset;
-
-            int count = 1;
-            double sum = data[idx + i * NN * MM];
-
-
-            if (idx % MM != 0) // лево
-            {
-                sum += data[left];
-                count++;
-            }
-
-            if (idx % MM != MM - 1) // право
-            {
-                sum += data[right];
-                count++;
-            }
-
-            if (up - offset >= MM) // верх
-            {
-                sum += data[up];
-                count++;
-            }
-
-            if (down - offset < MM * NN - MM) // низ
-            {
-                sum += data[down];
-                count++;
-            }
-
-            data_new[idx + i * NN * MM] = sum / count;
-
-            //printf("%e \n", data[idx]);
-        }
-    }
-}
-
-__global__ void convert_to_csr(double *data, double *val, int *id, int *pos)
-{
-    pos[0] = 0;
-    int i = 0;
-    for (int m = 0; m < MM; ++m)
-    {
-        for (int n = 0; n < NN; ++n)
-        {
-            int count = 0;
-            for (int k = 0; k < N_CONCENTRATIONS; k++)
-            {
-                if (data[k * MM * NN + m * NN + n] != 0)
+                if (status[idx - 1] == -666) // если сосед слева смешанная ячейка
                 {
-                    val[i] = data[k * MM * NN + m * NN + n];
-                    id[i] = k;
-                    i++;
-                    count++;
+                    for (int j = 1; j < N_CONCENTRATIONS; j++) // находим вещество, которое детонирует
+                    {
+                        if (data[(idx - 1) * N_CONCENTRATIONS + j] > 0)
+                        {
+                            max = j;
+                            max_val = data[(idx - 1) * N_CONCENTRATIONS + j];
+                        }
+                    }
                 }
             }
 
-            pos[m * NN + n + 1] = pos[m * NN + n] + count;
+            if (idx % NN != NN - 1) // если справа есть сосед, то смотрим его
+            {
+                if (status[idx + 1] == -666) // если сосед слева смешанная ячейка
+                {
+                    for (int j = 1; j < N_CONCENTRATIONS; j++) // находим вещество, которое детонирует
+                    {
+                        if (data[(idx + 1) * N_CONCENTRATIONS + j] > 0)
+                        {
+                            if (max_val < data[(idx + 1) * N_CONCENTRATIONS + j])
+                            {
+                                max = j;
+                                max_val = data[(idx + 1) * N_CONCENTRATIONS + j];
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (idx - NN >= 0) // если сверху есть сосед, то смотрим его
+            {
+                if (status[idx - NN] == -666) // если сверху слева смешанная ячейка
+                {
+                    for (int j = 1; j < N_CONCENTRATIONS; j++) // находим вещество, которое детонирует
+                    {
+                        if (data[(idx - NN) * N_CONCENTRATIONS + j] > 0)
+                        {
+                            if (max_val < data[(idx - NN) * N_CONCENTRATIONS + j])
+                            {
+                                max = j;
+                                max_val = data[(idx - NN) * N_CONCENTRATIONS + j];
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (idx + NN < MM * NN) // если снизу есть сосед, то смотрим его
+            {
+                if (status[idx + NN] == -666) // если снизу слева смешанная ячейка
+                {
+                    for (int j = 1; j < N_CONCENTRATIONS; j++) // находим вещество, которое детонирует
+                    {
+                        if (data[(idx + NN) * N_CONCENTRATIONS + j] > 0)
+                        {
+                            if (max_val < data[(idx + NN) * N_CONCENTRATIONS + j])
+                            {
+                                max = j;
+                                max_val = data[(idx + NN) * N_CONCENTRATIONS + j];
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (max != 0 && max_val > DISTRIBUTION_COEFF) // если мы нашли вещество, которое перетечет в эту ячейку и этого вещества достаточно для детонации
+            {
+                status[idx] = -1; // временно запишем, что эта ячейка станет детоном
+                data[idx * N_CONCENTRATIONS + max] = max_val * TRANSFER_COEFF; // записали сколько вещества перетечет и умножили на коэф перетечения
+            }
         }
     }
 }
 
+__global__ void test_update_default_easy(int* status)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x; // номер ячейки
+
+    if (idx < NN * MM) // так как нитей запускали больше, чем ячеек
+    {
+        if (status[idx] == -666) status[idx] = 666;
+        if (status[idx] == -1) status[idx] = -666;
+    }
+}
+
+//__global__ void test_default(double *data, double *data_new)
+//{
+//    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+//
+//    if (idx < NN * MM)
+//    {
+//        for (int i = 0; i < N_CONCENTRATIONS; i++)
+//        {
+//            int offset = i * NN * MM;
+//
+//            int left = idx - 1 + offset;
+//            int right = idx + 1 + offset;
+//            int up = idx - MM + offset;
+//            int down = idx + MM + offset;
+//
+//            int count = 1;
+//            double sum = data[idx + i * NN * MM];
+//
+//
+//            if (idx % MM != 0) // лево
+//            {
+//                sum += data[left];
+//                count++;
+//            }
+//
+//            if (idx % MM != MM - 1) // право
+//            {
+//                sum += data[right];
+//                count++;
+//            }
+//
+//            if (up - offset >= MM) // верх
+//            {
+//                sum += data[up];
+//                count++;
+//            }
+//
+//            if (down - offset < MM * NN - MM) // низ
+//            {
+//                sum += data[down];
+//                count++;
+//            }
+//
+//            data_new[idx + i * NN * MM] = sum / count;
+//
+//            //printf("%e \n", data[idx]);
+//        }
+//    }
+//}
+
+//__global__ void csr_precount(double *val, int *id, int *pos)
+//{
+//    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+//    
+//    // крайняя левая и крайняя правая ячейки сетки, которые рассматривает данная нить (не превышет размер MM * NN)
+//    int left = THREAD_IN_BLOCK * idx;  
+//    int right = THREAD_IN_BLOCK * (idx + 1) - 1;
+//
+//    // не выходим за границы сетки
+//    if (left >= MM * NN)
+//        return;
+//
+//    if (right >= MM * NN)
+//        right = MM * NN - 1;
+//
+//    __shared__ int count[THREAD_IN_BLOCK];
+//
+//    // нитка идет по своим ячейкам и добавляет, если нам нужно расширить память массивов
+//    for (int i = 0; i <= right - left; i++)
+//    {
+//        int index_left = pos[left + i];
+//        int index_right = pos[left + i + 1];
+//
+//        int consist[N_CONCENTRATIONS]; // Надеюсь он обнулен
+//
+//        for (int j = index_left; j < index_right; j++) // заполним вещества, которые есть в ячейке
+//        {
+//            consist[id[j]] = 1;
+//        }
+//
+//        if (left + i % MM != 0) // проверка левого соседа
+//        {
+//            for (int j = pos[left + i - 1]; j < pos[left + i]; j++)
+//            {
+//                if (consist[id[j]] != 1)
+//                    consist[id[j]] = -1;
+//            }
+//        }
+//
+//        if (left + i % MM != MM - 1) // проверка правого соседа
+//        {
+//            for (int j = pos[left + i]; j < pos[left + i + 1]; j++)
+//            {
+//                if (consist[id[j]] != 1)
+//                    consist[id[j]] = -1;
+//            }
+//        }
+//
+//        if (left + i >= MM) // проверка верхнего соседа
+//        {
+//            for (int j = pos[left + i - MM]; j < pos[left + i + 1 - MM]; j++)
+//            {
+//                if (consist[id[j]] != 1)
+//                    consist[id[j]] = -1;
+//            }
+//        }
+//
+//        if (left + i < MM * NN - MM) // проверка нижнего соседа
+//        {
+//            for (int j = pos[left + i + MM]; j < pos[left + i + 1 + MM]; j++)
+//            {
+//                if (consist[id[j]] != 1)
+//                    consist[id[j]] = -1;
+//            }
+//        }
+//
+//        // подсчитать все -1 и плюсануть счетчик нити
+//        for (int j = 0; j < N_CONCENTRATIONS; j++)
+//        {
+//            if (consist[j] == -1)
+//                count[threadIdx.x]++;
+//        }
+//    }
+//
+//    __syncthreads();
+//    // методом сдваивания найти для этого запуска ядра количество увеличения памяти
+//    //int res = 0;
+//
+//    //count[threadIdx.x];
+//
+//    for (int s = 1; s < blockDim.x; s *= 2) 
+//    {
+//        if (threadIdx.x % (2 * s) == 0) 
+//        {
+//            count[threadIdx.x] += count[threadIdx.x + s];
+//        }
+//
+//        __syncthreads();
+//    }
+//
+//    //if (threadIdx.x == 0) output[blockIdx.x] = count[0];
+//}
+//
+//__global__ void test_csr(double* data, double* data_new)
+//{
+//    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+//
+//    if (idx < NN * MM)
+//    {
+//        for (int i = 0; i < N_CONCENTRATIONS; i++)
+//        {
+//            int offset = i * NN * MM;
+//
+//            int left = idx - 1 + offset;
+//            int right = idx + 1 + offset;
+//            int up = idx - MM + offset;
+//            int down = idx + MM + offset;
+//
+//            int count = 1;
+//            double sum = data[idx + i * NN * MM];
+//
+//
+//            if (idx % MM != 0) // лево
+//            {
+//                sum += data[left];
+//                count++;
+//            }
+//
+//            if (idx % MM != MM - 1) // право
+//            {
+//                sum += data[right];
+//                count++;
+//            }
+//
+//            if (up - offset >= MM) // верх
+//            {
+//                sum += data[up];
+//                count++;
+//            }
+//
+//            if (down - offset < MM * NN - MM) // низ
+//            {
+//                sum += data[down];
+//                count++;
+//            }
+//
+//            data_new[idx + i * NN * MM] = sum / count;
+//
+//            //printf("%e \n", data[idx]);
+//        }
+//    }
+//}
+//
+//__global__ void convert_to_csr(double *data, double *val, int *id, int *pos)
+//{
+//    pos[0] = 0;
+//    int i = 0;
+//    for (int m = 0; m < MM; ++m)
+//    {
+//        for (int n = 0; n < NN; ++n)
+//        {
+//            int count = 0;
+//            for (int k = 0; k < N_CONCENTRATIONS; k++)
+//            {
+//                if (data[k * MM * NN + m * NN + n] != 0)
+//                {
+//                    val[i] = data[k * MM * NN + m * NN + n];
+//                    id[i] = k;
+//                    i++;
+//                    count++;
+//                }
+//            }
+//
+//            pos[m * NN + n + 1] = pos[m * NN + n] + count;
+//        }
+//    }
+//}
+
 int main()
 {
-    int size = N_CONCENTRATIONS * NN * MM;
 
-    double *data; // храним все вещества в каждой ячейке по порядку
-    data = new double[size] {0.0}; 
-
-    bool *status; // информация о том смешанная ячейка или нет
-    status = new bool[NN * MM] {false}; // по умолчанию все ячейки 
-    
-    //double *data_new;
-    //data_new = new double[size]; // каждый слой отвечает за свое вещество
-
-    Init(data, status);
-
-    Printer(data, status);
-
-    //double *d_data;
-    //double* d_data_new;
-    //
-    //cudaSetDevice(0);
-
-    //cudaMalloc((void**)&d_data, size * sizeof(double));
-    //cudaMalloc((void**)&d_data_new, size * sizeof(double));
-    //cudaMemcpy(d_data, data, size * sizeof(double), cudaMemcpyHostToDevice);
-
-    //for (int i = 0; i < 100; i++)
-    //{
-    //    test_default << <THREAD_IN_BLOCK, (NN * MM + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_data, d_data_new);
-    //    test_default << <THREAD_IN_BLOCK, (NN * MM + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_data_new, d_data);
-    //}
+#ifdef DEFAULT_EASY
+    default_easy();
+#endif
 
 
-    //cudaMemcpy(data_new, d_data_new, size * sizeof(double), cudaMemcpyDeviceToHost);
-    //cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
-
-    //Printer(data_new);
-    //Printer(data);
 
     // Мысль 1. 
     // Что если хранить не double, а два int, типо мантисса и порядок?
@@ -411,25 +488,11 @@ int main()
     // Теоретические плюсы: 
     // Теоретические минусы:
 
-
-
-    // Придумать какие-то тесты!
-
-
-
-
-    delete[] data;
     return 0;
 }
 
-void Init(double* data, bool *status)
-{
-    // все ячейки имеют нулевое вещество
-    for (int i = 0; i < MM * NN * N_CONCENTRATIONS; i += 5)
-    {
-        data[i] = 1.0;
-    }
-    
+void Init(double* data, int *status)
+{  
     set<pair<int, int>> tmp; // для проверки (что бы не зарандомить такуюже координату)
 
     for (int i = 1; i < N_CONCENTRATIONS; i++)
@@ -446,17 +509,16 @@ void Init(double* data, bool *status)
         {
             tmp.insert(std::make_pair(row, col));
 
-            status[row * NN + col] = true;
+            status[row * NN + col] = -666; // объявили ячейку смешанной
 
             double r = static_cast <double> (rand()) / static_cast <double> (RAND_MAX); // рандомим количество вещества, которое будет лежать в ячейке
 
-            data[(row * NN + col) * N_CONCENTRATIONS] = 1.0 - r;
             data[(row * NN + col) * N_CONCENTRATIONS + i] = r;
         }
     }
 }
 
-void Printer(double *data, bool *status)
+void Printer(double *data, int *status)
 {
     cout << "   ";
     for (int n = 0; n < NN; ++n)
@@ -486,6 +548,48 @@ void Printer(double *data, bool *status)
         }
         cout << endl;
     }
+}
+
+void default_easy()
+{
+    int size = N_CONCENTRATIONS * NN * MM;
+
+    double *data; // храним все вещества в каждой ячейке по порядку
+    data = new double[size] {0.0};
+
+    int *status; // информация о том смешанная ячейка или нет
+    status = new int[NN * MM] {0}; // по умолчанию все ячейки 
+
+    Init(data, status);
+
+    Printer(data, status);
+
+    double *d_data;
+    int *d_status;
+
+    cudaSetDevice(0);
+
+    cudaMalloc((void**)&d_data, size * sizeof(double));
+    cudaMalloc((void**)&d_status, MM * NN * sizeof(int));
+
+    cudaMemcpy(d_data, data, size * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_status, status, MM * NN * sizeof(int), cudaMemcpyHostToDevice);
+
+    for (int i = 0; i < N_STEP; i++)
+    {
+        test_default_easy << < THREAD_IN_BLOCK, (NN * MM + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_data, d_status);
+        test_update_default_easy << < THREAD_IN_BLOCK, (NN * MM + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_status);
+    }
+
+    cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(status, d_status, MM * NN * sizeof(int), cudaMemcpyDeviceToHost);
+
+    Printer(data, status);
+
+    delete[] data;
+    delete[] status;
+    cudaFree(d_data);
+    cudaFree(d_status);
 }
 
 //void Init(double* data)
