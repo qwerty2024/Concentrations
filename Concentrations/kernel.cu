@@ -4,7 +4,9 @@
 
 #include <stdio.h>
 #include <iostream>
+#include <fstream>
 #include <vector>
+#include <string>
 #include <set>
 
 using std::cout;
@@ -15,17 +17,19 @@ using std::set;
 
 // Опции включить тесты
 #define DEFAULT_EASY
-#define DEFAULT_HARD
+//#define DEFAULT_HARD
 
 // Общие макросы для задания параметров
+#define SAVE                        // Сохраняем данные, что бы потом визуализировать питон скриптом
+#define TIMER                         // Чисто вычисления, без копирования и конвертации
 //#define PRINTER                     // Полезно для отладки, смотрим что было до и после
-#define THREAD_IN_BLOCK 256         // нитей в блоке
-#define N_CONCENTRATIONS (int)3     // Количество концентраций
-#define MM (int)6000                  // Количество строк
-#define NN (int)6000                   // Количество столбцов
-#define N_STEP 1500                   // Сколько раз повторить распространение волн
-#define DISTRIBUTION_COEFF 0.001      // Если столько есть вещества в ячейке, то оно сдетанирует соседнюю ячекйку
-#define TRANSFER_COEFF 0.99         // Сколько процетов вещества перенесется в соседнюю ячейку
+#define THREAD_IN_BLOCK 256           // нитей в блоке
+#define N_CONCENTRATIONS (int)7       // Количество концентраций
+#define MM (int)150                  // Количество строк
+#define NN (int)150                  // Количество столбцов
+#define N_STEP 50                      // Сколько раз повторить распространение волн
+#define DISTRIBUTION_COEFF 0.0001     // Если столько есть вещества в ячейке, то оно сдетанирует соседнюю ячекйку
+#define TRANSFER_COEFF 0.90           // Сколько процетов вещества перенесется в соседнюю ячейку
 
 // Макросы отдельные для тестов
 #define LOAD_THREAD_DEFAULT_HARD 4      // количество ячеек на нить для DEFAULT_HARD
@@ -470,6 +474,8 @@ __global__ void test_update_default_hard(int* status)
 
 int main()
 {
+    cudaSetDevice(0);
+
     // исходные данные (что бы у всех тестов были одинаковые)
     double *data = nullptr;   // храним все вещества в каждой ячейке по порядку
     int *status = nullptr;    // информация о том смешанная ячейка или нет (-666 означает смешанная)
@@ -662,6 +668,12 @@ void Printer(double *data, int *status)
 
 void default_easy(const double* _data, const int* _status)
 {
+#ifdef TIMER
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+#endif
+
     int size = N_CONCENTRATIONS * NN * MM;
 
     double *data; // храним все вещества в каждой ячейке по порядку
@@ -688,19 +700,61 @@ void default_easy(const double* _data, const int* _status)
     double *d_data;
     int *d_status;
 
-    cudaSetDevice(0);
-
     cudaMalloc((void**)&d_data, size * sizeof(double));
     cudaMalloc((void**)&d_status, MM * NN * sizeof(int));
 
     cudaMemcpy(d_data, data, size * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_status, status, MM * NN * sizeof(int), cudaMemcpyHostToDevice);
 
+#ifdef TIMER
+    cudaEventRecord(start, 0);
+#endif
+
+
     for (int i = 0; i < N_STEP; i++)
     {
         test_default_easy << < THREAD_IN_BLOCK, (NN * MM + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_data, d_status);
         test_update_default_easy << < THREAD_IN_BLOCK, (NN * MM + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_status);
+
+#ifdef SAVE
+        std::string name = "data/DEFAULT_EASY/" + std::to_string(i + 1) + ".txt";
+        std::ofstream out;          // поток для записи
+        out.open(name);      // открываем файл для записи
+        if (out.is_open())
+        {
+            //out << "Hello World!" << std::endl;
+            cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
+
+            for (int k = 0; k < MM * NN; k++)
+            {
+                int item = 0;
+                double val = 0.0;
+
+                for (int f = 1; f < N_CONCENTRATIONS; f++)
+                {
+                    if (data[k * N_CONCENTRATIONS + f] > 0.00000000001)
+                    {
+                        item = f;
+                        val = data[k * N_CONCENTRATIONS + f];
+                        break;
+                    }
+                }
+                out << item << " " << val << std::endl;
+            }
+        }
+        out.close();
+#endif
+
     }
+
+#ifdef TIMER
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    float elapsedTime;
+    cudaEventElapsedTime(&elapsedTime, start, stop); 
+
+    cout << "DEFAULT EASY TIME = " << elapsedTime / 1000 << endl;
+#endif
 
     cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(status, d_status, MM * NN * sizeof(int), cudaMemcpyDeviceToHost);
@@ -709,19 +763,30 @@ void default_easy(const double* _data, const int* _status)
     Printer(data, status);
 #endif
 
-    //double res = 0;
-    //for (int i = 0; i < size; i++)
-    //    res += data[i];
-    //cout << res << endl;
+    double res = 0;
+    for (int i = 0; i < size; i++)
+        res += data[i];
+    cout << res << endl;
 
     delete[] data;
     delete[] status;
     cudaFree(d_data);
     cudaFree(d_status);
+
+#ifdef TIMER
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+#endif
 }
 
 void default_hard(const double* _data, const int* _status)
 {
+#ifdef TIMER
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+#endif
+
     int size = N_CONCENTRATIONS * NN * MM;
 
     double* data; // храним все вещества в каждой ячейке по порядку
@@ -748,19 +813,30 @@ void default_hard(const double* _data, const int* _status)
     double* d_data;
     int* d_status;
 
-    cudaSetDevice(0);
-
     cudaMalloc((void**)&d_data, size * sizeof(double));
     cudaMalloc((void**)&d_status, MM * NN * sizeof(int));
 
     cudaMemcpy(d_data, data, size * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_status, status, MM * NN * sizeof(int), cudaMemcpyHostToDevice);
 
+#ifdef TIMER
+    cudaEventRecord(start, 0);
+#endif
+
     for (int i = 0; i < N_STEP; i++)
     {
         test_default_hard << < THREAD_IN_BLOCK, ((NN * MM + LOAD_THREAD_DEFAULT_HARD) / LOAD_THREAD_DEFAULT_HARD + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_data, d_status);
         test_update_default_hard << < THREAD_IN_BLOCK, ((NN * MM + LOAD_THREAD_DEFAULT_HARD) / LOAD_THREAD_DEFAULT_HARD + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_status);
     }
+
+#ifdef TIMER
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    float elapsedTime;
+    cudaEventElapsedTime(&elapsedTime, start, stop); 
+
+    cout << "DEFAULT HARD TIME = " << elapsedTime / 1000 << endl;
+#endif
 
     cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(status, d_status, MM * NN * sizeof(int), cudaMemcpyDeviceToHost);
@@ -769,15 +845,20 @@ void default_hard(const double* _data, const int* _status)
     Printer(data, status);
 #endif
 
-    //double res = 0;
-    //for (int i = 0; i < size; i++)
-    //    res += data[i];
-    //cout << res << endl;
+    double res = 0;
+    for (int i = 0; i < size; i++)
+        res += data[i];
+    cout << res << endl;
 
     delete[] data;
     delete[] status;
     cudaFree(d_data);
     cudaFree(d_status);
+
+#ifdef TIMER
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+#endif
 }
 
 //void Init(double* data)
@@ -844,8 +925,6 @@ void default_hard(const double* _data, const int* _status)
 //        cout << endl << endl << endl;
 //    }
 //}
-
-
 
 
 
