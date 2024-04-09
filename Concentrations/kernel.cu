@@ -15,30 +15,33 @@ using std::set;
 
 // Опции включить тесты
 #define DEFAULT_EASY
+#define DEFAULT_HARD
 
-// Макросы для задания параметров теста
-#define N_CONCENTRATIONS (int)2     // Количество концентраций
-#define MM (int)5                   // Количество строк
-#define NN (int)5                   // Количество столбцов
-#define N_STEP 15                   // Сколько раз повторить распространение волн
-#define DISTRIBUTION_COEFF 0.02      // Если столько есть вещества в ячейке, то оно сдетанирует соседнюю ячекйку
-#define TRANSFER_COEFF 0.50         // Сколько процетов вещества перенесется в соседнюю ячейку
+// Общие макросы для задания параметров
+//#define PRINTER                     // Полезно для отладки, смотрим что было до и после
+#define THREAD_IN_BLOCK 256         // нитей в блоке
+#define N_CONCENTRATIONS (int)3     // Количество концентраций
+#define MM (int)6000                  // Количество строк
+#define NN (int)6000                   // Количество столбцов
+#define N_STEP 1500                   // Сколько раз повторить распространение волн
+#define DISTRIBUTION_COEFF 0.001      // Если столько есть вещества в ячейке, то оно сдетанирует соседнюю ячекйку
+#define TRANSFER_COEFF 0.99         // Сколько процетов вещества перенесется в соседнюю ячейку
 
-
-#define THREAD_IN_BLOCK 256
-#define LOAD_THREAD_CSR 8      // нагрузка на нить в расчетах новой длины массива для CSR
+// Макросы отдельные для тестов
+#define LOAD_THREAD_DEFAULT_HARD 4      // количество ячеек на нить для DEFAULT_HARD
+//#define LOAD_THREAD_CSR 8      // количество ячеек на нить в расчетах новой длины массива для CSR
 
 // Функции тестов
-void default_easy();
+void default_easy(const double*, const int*);
+void default_hard(const double*, const int*);
 
 // Вспомогательные функции (тело ниже)
 void Printer(double*, int*);
-void Init(double*, int*);
+void Init(double*&, int*&);
 
 __global__ void test_default_easy(double* data, int* status)
 {
     int idx = blockDim.x * blockIdx.x + threadIdx.x; // номер ячейки
-    //int index = idx * N_CONCENTRATIONS; // индекс начала ячейки в глобальном массиве
 
     if (idx < NN * MM) // так как нитей запускали больше, чем ячеек
     {
@@ -136,6 +139,118 @@ __global__ void test_update_default_easy(int* status)
     }
 }
 
+__global__ void test_default_hard(double* data, int* status)
+{
+    int idx = (blockDim.x * blockIdx.x + threadIdx.x) * LOAD_THREAD_DEFAULT_HARD; // номер стартовой ячейки
+
+    for (int k = 0; k < LOAD_THREAD_DEFAULT_HARD; k++)
+    {
+        if (idx < NN * MM) // так как нитей запускали больше, чем ячеек
+        {
+            if (status[idx] == 0) // производим расчет веществ, которые стекутся в эту ячейку от соседей
+            {
+                int max = 0;            // индекс самого сильного вещества
+                double max_val = 0.0;   // значение самого сильного вещества
+
+                if (idx % NN != 0) // если слева есть сосед, то смотрим его
+                {
+                    if (status[idx - 1] == -666) // если сосед слева смешанная ячейка
+                    {
+                        for (int j = 1; j < N_CONCENTRATIONS; j++) // находим вещество, которое детонирует
+                        {
+                            if (data[(idx - 1) * N_CONCENTRATIONS + j] > 0)
+                            {
+                                max = j;
+                                max_val = data[(idx - 1) * N_CONCENTRATIONS + j];
+                            }
+                        }
+                    }
+                }
+
+                if (idx % NN != NN - 1) // если справа есть сосед, то смотрим его
+                {
+                    if (status[idx + 1] == -666) // если сосед слева смешанная ячейка
+                    {
+                        for (int j = 1; j < N_CONCENTRATIONS; j++) // находим вещество, которое детонирует
+                        {
+                            if (data[(idx + 1) * N_CONCENTRATIONS + j] > 0)
+                            {
+                                if (max_val < data[(idx + 1) * N_CONCENTRATIONS + j])
+                                {
+                                    max = j;
+                                    max_val = data[(idx + 1) * N_CONCENTRATIONS + j];
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (idx - NN >= 0) // если сверху есть сосед, то смотрим его
+                {
+                    if (status[idx - NN] == -666) // если сверху слева смешанная ячейка
+                    {
+                        for (int j = 1; j < N_CONCENTRATIONS; j++) // находим вещество, которое детонирует
+                        {
+                            if (data[(idx - NN) * N_CONCENTRATIONS + j] > 0)
+                            {
+                                if (max_val < data[(idx - NN) * N_CONCENTRATIONS + j])
+                                {
+                                    max = j;
+                                    max_val = data[(idx - NN) * N_CONCENTRATIONS + j];
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (idx + NN < MM * NN) // если снизу есть сосед, то смотрим его
+                {
+                    if (status[idx + NN] == -666) // если снизу слева смешанная ячейка
+                    {
+                        for (int j = 1; j < N_CONCENTRATIONS; j++) // находим вещество, которое детонирует
+                        {
+                            if (data[(idx + NN) * N_CONCENTRATIONS + j] > 0)
+                            {
+                                if (max_val < data[(idx + NN) * N_CONCENTRATIONS + j])
+                                {
+                                    max = j;
+                                    max_val = data[(idx + NN) * N_CONCENTRATIONS + j];
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (max != 0 && max_val > DISTRIBUTION_COEFF) // если мы нашли вещество, которое перетечет в эту ячейку и этого вещества достаточно для детонации
+                {
+                    status[idx] = -1; // временно запишем, что эта ячейка станет детоном
+                    data[idx * N_CONCENTRATIONS + max] = max_val * TRANSFER_COEFF; // записали сколько вещества перетечет и умножили на коэф перетечения
+                }
+            }
+        }
+        else break;
+
+        idx++;
+    }
+}
+
+__global__ void test_update_default_hard(int* status)
+{
+    int idx = (blockDim.x * blockIdx.x + threadIdx.x) * LOAD_THREAD_DEFAULT_HARD; // номер ячейки
+
+    for (int k = 0; k < LOAD_THREAD_DEFAULT_HARD; k++)
+    {
+        if (idx < NN * MM) // так как нитей запускали больше, чем ячеек
+        {
+            if (status[idx] == -666) status[idx] = 666;
+            if (status[idx] == -1) status[idx] = -666;
+        }
+        else break;
+
+        idx++;
+    }
+}
+
 //__global__ void test_default(double *data, double *data_new)
 //{
 //    int idx = blockDim.x * blockIdx.x + threadIdx.x;
@@ -185,7 +300,6 @@ __global__ void test_update_default_easy(int* status)
 //        }
 //    }
 //}
-
 //__global__ void csr_precount(double *val, int *id, int *pos)
 //{
 //    int idx = blockDim.x * blockIdx.x + threadIdx.x;
@@ -356,11 +470,20 @@ __global__ void test_update_default_easy(int* status)
 
 int main()
 {
+    // исходные данные (что бы у всех тестов были одинаковые)
+    double *data = nullptr;   // храним все вещества в каждой ячейке по порядку
+    int *status = nullptr;    // информация о том смешанная ячейка или нет (-666 означает смешанная)
+
+    Init(data, status); // заполнение
+
 
 #ifdef DEFAULT_EASY
-    default_easy();
+    default_easy(data, status);
 #endif
 
+#ifdef DEFAULT_HARD
+    default_hard(data, status);
+#endif
 
 
     // Мысль 1. 
@@ -397,50 +520,31 @@ int main()
     //double *d_val;
     //int *d_id;
     //int *d_pos; // сюда бы Long long лучше
-
     //for (int i = 0; i < size; i++) // самый простой тупой способ подсчета ненудевых частей
     //{
     //    if (data[i] != 0) nnz++;
     //}
-
     //cudaMalloc((void**)&d_val, nnz * sizeof(double));
     //cudaMalloc((void**)&d_id, nnz * sizeof(int));
     //cudaMalloc((void**)&d_pos, MM * NN * sizeof(int) + 1); // по количеству ячеек в сетке
-
     //convert_to_csr <<<1, 1>>> (d_data, d_val, d_id, d_pos); // чисто одно ядро делает конвертацию, конечно можно немного распараллелить, но нужно сделать доп вычисления
-
     //cudaDeviceSynchronize();
-
     //int numOutputElements; // number of elements in the output list, initialised below
-
     //numOutputElements = numInputElements / (THREAD_IN_BLOCK / 2);
     //if (numInputElements % (THREAD_IN_BLOCK / 2)) 
     //{
     //    numOutputElements++;
     //}
-
     //hostOutput = (int*)malloc(numOutputElements * sizeof(int));
-
-
     //for (int i = 0; i < numInputElements; ++i) {
     //    hostInput[i] = 1;
     //}
-
     //reduce0 << <gridSize, blockSize >> > (deviceInput, deviceOutput);
-
     //cudaMemcpy(hostOutput, deviceOutput, numOutputElements * sizeof(int), cudaMemcpyDeviceToHost);
-
     //for (int ii = 1; ii < numOutputElements; ii++) {
     //    hostOutput[0] += hostOutput[ii]; //accumulates the sum in the first element
     //}
-
     //int sumGPU = hostOutput[0];
-
-
-
-
-
-
     //double *val = new double[nnz];
     //int *id = new int[nnz];
     //int *pos = new int[MM * NN + 1]; 
@@ -448,10 +552,6 @@ int main()
     //cudaMemcpy(val, d_val, nnz * sizeof(double), cudaMemcpyDeviceToHost);
     //cudaMemcpy(id, d_id, nnz * sizeof(int), cudaMemcpyDeviceToHost);
     //cudaMemcpy(pos, d_pos, MM * NN * sizeof(int) + 1, cudaMemcpyDeviceToHost);
-
-
-
-
     //for (int i = 0; i < nnz; i++)
     //{
     //    std::cout << "[" << id[i] << "]" << val[i] << " ";
@@ -488,11 +588,21 @@ int main()
     // Теоретические плюсы: 
     // Теоретические минусы:
 
+
+    // чисточка
+    delete[] data;
+    delete[] status;
+
     return 0;
 }
 
-void Init(double* data, int *status)
+void Init(double *&data, int *&status)
 {  
+    int size = N_CONCENTRATIONS * NN * MM;
+    
+    data = new double[size] {0.0};
+    status = new int[NN * MM] {0}; // по умолчанию все ячейки 
+
     set<pair<int, int>> tmp; // для проверки (что бы не зарандомить такуюже координату)
 
     for (int i = 1; i < N_CONCENTRATIONS; i++)
@@ -550,19 +660,30 @@ void Printer(double *data, int *status)
     }
 }
 
-void default_easy()
+void default_easy(const double* _data, const int* _status)
 {
     int size = N_CONCENTRATIONS * NN * MM;
 
     double *data; // храним все вещества в каждой ячейке по порядку
-    data = new double[size] {0.0};
+    data = new double[size];
 
     int *status; // информация о том смешанная ячейка или нет
-    status = new int[NN * MM] {0}; // по умолчанию все ячейки 
+    status = new int[NN * MM]; // по умолчанию все ячейки 
 
-    Init(data, status);
+    // копирование из исходных данных
+    for (int i = 0; i < size; i++)
+    {
+        data[i] = _data[i];
+    }
 
+    for (int i = 0; i < NN * MM; i++)
+    {
+        status[i] = _status[i];
+    }
+
+#ifdef PRINTER
     Printer(data, status);
+#endif
 
     double *d_data;
     int *d_status;
@@ -584,7 +705,74 @@ void default_easy()
     cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(status, d_status, MM * NN * sizeof(int), cudaMemcpyDeviceToHost);
 
+#ifdef PRINTER
     Printer(data, status);
+#endif
+
+    //double res = 0;
+    //for (int i = 0; i < size; i++)
+    //    res += data[i];
+    //cout << res << endl;
+
+    delete[] data;
+    delete[] status;
+    cudaFree(d_data);
+    cudaFree(d_status);
+}
+
+void default_hard(const double* _data, const int* _status)
+{
+    int size = N_CONCENTRATIONS * NN * MM;
+
+    double* data; // храним все вещества в каждой ячейке по порядку
+    data = new double[size];
+
+    int* status; // информация о том смешанная ячейка или нет
+    status = new int[NN * MM]; // по умолчанию все ячейки 
+
+    // копирование из исходных данных
+    for (int i = 0; i < size; i++)
+    {
+        data[i] = _data[i];
+    }
+
+    for (int i = 0; i < NN * MM; i++)
+    {
+        status[i] = _status[i];
+    }
+
+#ifdef PRINTER
+    Printer(data, status);
+#endif
+
+    double* d_data;
+    int* d_status;
+
+    cudaSetDevice(0);
+
+    cudaMalloc((void**)&d_data, size * sizeof(double));
+    cudaMalloc((void**)&d_status, MM * NN * sizeof(int));
+
+    cudaMemcpy(d_data, data, size * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_status, status, MM * NN * sizeof(int), cudaMemcpyHostToDevice);
+
+    for (int i = 0; i < N_STEP; i++)
+    {
+        test_default_hard << < THREAD_IN_BLOCK, ((NN * MM + LOAD_THREAD_DEFAULT_HARD) / LOAD_THREAD_DEFAULT_HARD + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_data, d_status);
+        test_update_default_hard << < THREAD_IN_BLOCK, ((NN * MM + LOAD_THREAD_DEFAULT_HARD) / LOAD_THREAD_DEFAULT_HARD + THREAD_IN_BLOCK) / THREAD_IN_BLOCK >> > (d_status);
+    }
+
+    cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(status, d_status, MM * NN * sizeof(int), cudaMemcpyDeviceToHost);
+
+#ifdef PRINTER
+    Printer(data, status);
+#endif
+
+    //double res = 0;
+    //for (int i = 0; i < size; i++)
+    //    res += data[i];
+    //cout << res << endl;
 
     delete[] data;
     delete[] status;
