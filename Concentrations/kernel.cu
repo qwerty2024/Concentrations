@@ -16,21 +16,24 @@ using std::pair;
 using std::set;
 
 // Опции включить тесты
-#define DEFAULT_EASY
-#define DEFAULT_HARD
+//#define DEFAULT_EASY
+//#define DEFAULT_HARD
+#define CSR
 
-// Общие макросы для задания параметров
-//#define TEST                            // Проверяем контрльную сумму
+// Дополнительные опции
+//#define TEST                        // Проверяем контрльную сумму
 //#define SAVE                        // Сохраняем данные, что бы потом визуализировать питон скриптом
-//#define TIMER                         // Чисто вычисления, без копирования и конвертации
-//#define PRINTER                     // Полезно для отладки, смотрим что было до и после
+//#define TIMER                       // Чисто вычисления, без копирования и конвертации
+#define PRINTER                     // Полезно для отладки, смотрим что было до и после
+
+// Параметры задачи
 #define THREAD_IN_BLOCK 256           // нитей в блоке
-#define N_CONCENTRATIONS (int)11       // Количество концентраций
-#define MM (int)10000                  // Количество строк
-#define NN (int)5000                  // Количество столбцов
-#define N_STEP 150                      // Сколько раз повторить распространение волн
-#define DISTRIBUTION_COEFF 0.0001     // Если столько есть вещества в ячейке, то оно сдетанирует соседнюю ячекйку
-#define TRANSFER_COEFF 0.99           // Сколько процетов вещества перенесется в соседнюю ячейку
+#define N_CONCENTRATIONS (int)5      // Количество концентраций
+#define MM (int)5                 // Количество строк
+#define NN (int)5                  // Количество столбцов
+#define N_STEP 1                    // Сколько раз повторить распространение волн
+#define DISTRIBUTION_COEFF 0.01     // Если столько есть вещества в ячейке, то оно сдетанирует соседнюю ячекйку
+#define TRANSFER_COEFF 0.9           // Сколько процетов вещества перенесется в соседнюю ячейку
 
 // Макросы отдельные для тестов
 #define LOAD_THREAD_DEFAULT_HARD 4      // количество ячеек на нить для DEFAULT_HARD
@@ -39,9 +42,10 @@ using std::set;
 // Функции тестов
 void default_easy(const double*, const int*);
 void default_hard(const double*, const int*);
+void csr(const double*, const int*);
 
 // Вспомогательные функции (тело ниже)
-void Printer(double*, int*);
+void Printer(const double*, const int*);
 void Init(double*&, int*&);
 
 __global__ void test_default_easy(double* data, int* status)
@@ -498,6 +502,9 @@ int main()
     default_hard(data, status);
 #endif
 
+#ifdef CSR
+    csr(data, status);
+#endif
 
     // Мысль 1. 
     // Что если хранить не double, а два int, типо мантисса и порядок?
@@ -533,7 +540,7 @@ int main()
     //double *d_val;
     //int *d_id;
     //int *d_pos; // сюда бы Long long лучше
-    //for (int i = 0; i < size; i++) // самый простой тупой способ подсчета ненудевых частей
+    //for (int i = 0; i < size; i++) // самый простой тупой способ подсчета ненулевых частей
     //{
     //    if (data[i] != 0) nnz++;
     //}
@@ -643,7 +650,7 @@ void Init(double *&data, int *&status)
     }
 }
 
-void Printer(double *data, int *status)
+void Printer(const double *data, const int *status)
 {
     cout << "   ";
     for (int n = 0; n < NN; ++n)
@@ -875,6 +882,198 @@ void default_hard(const double* _data, const int* _status)
     cudaEventDestroy(stop);
 #endif
 }
+
+void csr(const double* _data, const int* _status)
+{
+#ifdef TIMER
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+#endif
+
+#ifdef PRINTER
+    Printer(_data, _status);
+#endif
+
+    int size = N_CONCENTRATIONS * NN * MM;
+
+    int nnz = 0;
+
+
+    double* val;
+    int* id;
+    int* pos;
+
+    double* d_val;
+    int* d_id;
+    int* d_pos;
+
+
+    for (int i = 0; i < size; i++) // самый простой тупой способ подсчета ненулевых частей
+    {
+        if (_data[i] != 0) nnz++; 
+    }
+
+    val = new double[nnz];
+    id = new int[nnz];
+    pos = new int[MM * NN + 1];
+
+
+    pos[0] = 0;
+    int ind = 0;
+    for (int m = 0; m < MM; ++m)
+    {
+        for (int n = 0; n < NN; ++n)
+        {
+            int count = 0;
+            for (int k = 0; k < N_CONCENTRATIONS; k++)
+            {
+                
+                if (_data[m * NN * N_CONCENTRATIONS + n * N_CONCENTRATIONS + k] != 0)
+                {
+                    val[ind] = _data[m * NN * N_CONCENTRATIONS + n * N_CONCENTRATIONS + k];
+                    id[ind] = n;
+                    ind++;
+                    count++;
+                }
+            }
+
+            pos[m * NN + n + 1] = pos[m * NN + n] + count;
+        }
+    }
+
+    cudaMalloc((void**)&d_val, nnz * sizeof(double));
+    cudaMalloc((void**)&d_id, nnz * sizeof(int));
+    cudaMalloc((void**)&d_pos, MM * NN * sizeof(int) + 1); // по количеству ячеек в сетке
+
+    cudaMemcpy(d_val, val, nnz * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_id, id, nnz * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_pos, pos, MM * NN * sizeof(double) + 1, cudaMemcpyHostToDevice);
+
+    //for (int i = 0; i < nnz; i++)
+    //    cout << val[i] << " ";
+    //cout << endl;
+    //
+    //
+    //for (int i = 0; i < nnz; i++)
+    //    cout << id[i] << " ";
+    //cout << endl;
+    //
+    //
+    //for (int i = 0; i < MM * NN + 1; i++)
+    //    cout << pos[i] << " ";
+    //cout << endl;
+
+    delete[] val;
+    delete[] id;
+    delete[] pos;
+
+    //convert_to_csr <<<1, 1>>> (d_data, d_val, d_id, d_pos); // чисто одно ядро делает конвертацию, конечно можно немного распараллелить, но нужно сделать доп вычисления
+    //cudaDeviceSynchronize();
+
+
+
+
+
+    // TODO HERE
+
+
+
+
+
+
+
+
+
+
+
+
+
+    cudaFree(d_val);
+    cudaFree(d_id);
+    cudaFree(d_pos);
+
+
+//    double* data; // храним все вещества в каждой ячейке по порядку
+//    data = new double[size];
+//
+//    int* status; // информация о том смешанная ячейка или нет
+//    status = new int[NN * MM]; // по умолчанию все ячейки 
+//
+//    // копирование из исходных данных
+//    for (int i = 0; i < size; i++)
+//    {
+//        data[i] = _data[i];
+//    }
+//
+//    for (int i = 0; i < NN * MM; i++)
+//    {
+//        status[i] = _status[i];
+//    }
+//
+//#ifdef PRINTER
+//    Printer(data, status);
+//#endif
+//
+//    double* d_data;
+//    int* d_status;
+//
+//    cudaMalloc((void**)&d_data, size * sizeof(double));
+//    cudaMalloc((void**)&d_status, MM * NN * sizeof(int));
+//
+//    cudaMemcpy(d_data, data, size * sizeof(double), cudaMemcpyHostToDevice);
+//    cudaMemcpy(d_status, status, MM * NN * sizeof(int), cudaMemcpyHostToDevice);
+//
+//#ifdef TIMER
+//    cudaEventRecord(start, 0);
+//#endif
+//
+//    for (int i = 0; i < N_STEP; i++)
+//    {
+//        test_default_hard << < ((NN * MM + LOAD_THREAD_DEFAULT_HARD) / LOAD_THREAD_DEFAULT_HARD + THREAD_IN_BLOCK) / THREAD_IN_BLOCK, THREAD_IN_BLOCK >> > (d_data, d_status);
+//        test_update_default_hard << < ((NN * MM + LOAD_THREAD_DEFAULT_HARD) / LOAD_THREAD_DEFAULT_HARD + THREAD_IN_BLOCK) / THREAD_IN_BLOCK, THREAD_IN_BLOCK >> > (d_status);
+//    }
+//
+//#ifdef TIMER
+//    cudaEventRecord(stop, 0);
+//    cudaEventSynchronize(stop);
+//    float elapsedTime;
+//    cudaEventElapsedTime(&elapsedTime, start, stop);
+//
+//    cout << "DEFAULT HARD TIME = " << elapsedTime / 1000 << endl;
+//#endif
+//
+//#ifdef TEST
+//
+//    cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
+//    cudaMemcpy(status, d_status, MM * NN * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//#ifdef PRINTER
+//    Printer(data, status);
+//#endif
+//
+//    double res = 0;
+//    for (int i = 0; i < size; i++)
+//        res += data[i];
+//    cout << res << endl;
+//
+//#endif
+//
+//    delete[] data;
+//    delete[] status;
+//    cudaFree(d_data);
+//    cudaFree(d_status);
+//
+//#ifdef TIMER
+//    cudaEventDestroy(start);
+//    cudaEventDestroy(stop);
+//#endif
+}
+
+
+
+
+
 
 //void Init(double* data)
 //{
