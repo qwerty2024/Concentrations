@@ -24,7 +24,7 @@ using std::set;
 //#define TEST                        // Проверяем контрльную сумму
 //#define SAVE                        // Сохраняем данные, что бы потом визуализировать питон скриптом
 //#define TIMER                       // Чисто вычисления, без копирования и конвертации
-#define PRINTER                     // Полезно для отладки, смотрим что было до и после
+//#define PRINTER                     // Полезно для отладки, смотрим что было до и после
 
 // Параметры задачи
 #define THREAD_IN_BLOCK 256           // нитей в блоке
@@ -37,7 +37,7 @@ using std::set;
 
 // Макросы отдельные для тестов
 #define LOAD_THREAD_DEFAULT_HARD 4      // количество ячеек на нить для DEFAULT_HARD
-//#define LOAD_THREAD_CSR 8      // количество ячеек на нить в расчетах новой длины массива для CSR
+#define LOAD_THREAD_CSR 8      // количество ячеек на нить в расчетах новой длины массива для CSR
 
 // Функции тестов
 void default_easy(const double*, const int*);
@@ -258,6 +258,114 @@ __global__ void test_update_default_hard(int* status)
 
         idx++;
     }
+}
+
+__global__ void csr_precount(int *status, int *tmp_sum)
+{
+    int idx = (blockDim.x * blockIdx.x + threadIdx.x) * LOAD_THREAD_CSR; // номер стартовой ячейки
+
+    int count = 0;
+
+
+    for (int k = 0; k < LOAD_THREAD_CSR; k++)
+    {
+        if (idx < NN * MM) // так как нитей запускали больше, чем ячеек
+        {
+            if (status[idx] == 0) // производим расчет веществ, которые стекутся в эту ячейку от соседей
+            {
+                if (idx % NN != 0) // если слева есть сосед, то смотрим его
+                {
+                    if (status[idx - 1] == -666) // если сосед слева смешанная ячейка
+                    {
+                        count++;
+                        idx++;
+                        continue;
+                    }
+                }
+
+                if (idx % NN != NN - 1) // если справа есть сосед, то смотрим его
+                {
+                    if (status[idx + 1] == -666) // если сосед слева смешанная ячейка
+                    {
+                        count++;
+                        idx++;
+                        continue;
+                    }
+                }
+
+                if (idx - NN >= 0) // если сверху есть сосед, то смотрим его
+                {
+                    if (status[idx - NN] == -666) // если сверху слева смешанная ячейка
+                    {
+                        count++;
+                        idx++;
+                        continue;
+                    }
+                }
+
+                if (idx + NN < MM * NN) // если снизу есть сосед, то смотрим его
+                {
+                    if (status[idx + NN] == -666) // если снизу слева смешанная ячейка
+                    {
+                        count++;
+                        idx++;
+                        continue;
+                    }
+                }
+            }
+        }
+        else break;
+
+        idx++;
+    }
+
+    __syncthreads();
+
+    __shared__ int tmp[THREAD_IN_BLOCK];
+
+    tmp[threadIdx.x] = count;
+
+    for (int s = 1; s < THREAD_IN_BLOCK; s *= 2)
+    {
+        if (threadIdx.x % (2 * s) == 0)
+        {
+            tmp[threadIdx.x] += tmp[threadIdx.x + s];
+        }
+
+        __syncthreads();
+    }
+
+    tmp_sum[blockIdx.x] = tmp[0];
+}
+
+__global__ void csr_final_sum(int* tmp_sum, int *res, int count_blocks)
+{
+    int idx = threadIdx.x;
+
+    int count_for_thread = (count_blocks + 1024) / 1024; // каждая нить будет вычислять вот столько элементов
+
+    __shared__ int tmp[1024]; // обнуляется по умолчанию? - НЕТ
+    tmp[idx] = 0;
+
+    for (int i = 0; i < count_for_thread; i++)
+    {
+        if (idx * count_for_thread + i < count_blocks)
+            tmp[idx] += tmp_sum[idx * count_for_thread + i];
+    }
+
+    __syncthreads();
+
+    for (int s = 1; s < 1024; s *= 2)
+    {
+        if (threadIdx.x % (2 * s) == 0)
+        {
+            tmp[threadIdx.x] += tmp[threadIdx.x + s];
+        }
+
+        __syncthreads();
+    }
+    
+    *res = tmp[0];
 }
 
 //__global__ void test_default(double *data, double *data_new)
@@ -648,6 +756,10 @@ void Init(double *&data, int *&status)
             data[(row * NN + col) * N_CONCENTRATIONS + i] = r;
         }
     }
+
+#ifdef PRINTER
+    Printer(data, status);
+#endif
 }
 
 void Printer(const double *data, const int *status)
@@ -692,35 +804,14 @@ void default_easy(const double* _data, const int* _status)
 
     int size = N_CONCENTRATIONS * NN * MM;
 
-    double *data; // храним все вещества в каждой ячейке по порядку
-    data = new double[size];
-
-    int *status; // информация о том смешанная ячейка или нет
-    status = new int[NN * MM]; // по умолчанию все ячейки 
-
-    // копирование из исходных данных
-    for (int i = 0; i < size; i++)
-    {
-        data[i] = _data[i];
-    }
-
-    for (int i = 0; i < NN * MM; i++)
-    {
-        status[i] = _status[i];
-    }
-
-#ifdef PRINTER
-    Printer(data, status);
-#endif
-
     double *d_data;
     int *d_status;
 
     cudaMalloc((void**)&d_data, size * sizeof(double));
     cudaMalloc((void**)&d_status, MM * NN * sizeof(int));
 
-    cudaMemcpy(d_data, data, size * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_status, status, MM * NN * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_data, _data, size * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_status, _status, MM * NN * sizeof(int), cudaMemcpyHostToDevice);
 
 #ifdef TIMER
     cudaEventRecord(start, 0);
@@ -773,6 +864,12 @@ void default_easy(const double* _data, const int* _status)
 
 #ifdef TEST
 
+    double* data; // храним все вещества в каждой ячейке по порядку
+    data = new double[size];
+
+    int* status; // информация о том смешанная ячейка или нет
+    status = new int[NN * MM]; // по умолчанию все ячейки
+
     cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(status, d_status, MM * NN * sizeof(int), cudaMemcpyDeviceToHost);
 
@@ -784,10 +881,11 @@ void default_easy(const double* _data, const int* _status)
     for (int i = 0; i < size; i++)
         res += data[i];
     cout << res << endl;
-#endif
 
     delete[] data;
     delete[] status;
+#endif
+
     cudaFree(d_data);
     cudaFree(d_status);
 
@@ -807,35 +905,14 @@ void default_hard(const double* _data, const int* _status)
 
     int size = N_CONCENTRATIONS * NN * MM;
 
-    double* data; // храним все вещества в каждой ячейке по порядку
-    data = new double[size];
-
-    int* status; // информация о том смешанная ячейка или нет
-    status = new int[NN * MM]; // по умолчанию все ячейки 
-
-    // копирование из исходных данных
-    for (int i = 0; i < size; i++)
-    {
-        data[i] = _data[i];
-    }
-
-    for (int i = 0; i < NN * MM; i++)
-    {
-        status[i] = _status[i];
-    }
-
-#ifdef PRINTER
-    Printer(data, status);
-#endif
-
     double* d_data;
     int* d_status;
 
     cudaMalloc((void**)&d_data, size * sizeof(double));
     cudaMalloc((void**)&d_status, MM * NN * sizeof(int));
 
-    cudaMemcpy(d_data, data, size * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_status, status, MM * NN * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_data, _data, size * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_status, _status, MM * NN * sizeof(int), cudaMemcpyHostToDevice);
 
 #ifdef TIMER
     cudaEventRecord(start, 0);
@@ -858,6 +935,12 @@ void default_hard(const double* _data, const int* _status)
 
 #ifdef TEST
 
+    double* data; // храним все вещества в каждой ячейке по порядку
+    data = new double[size];
+
+    int* status; // информация о том смешанная ячейка или нет
+    status = new int[NN * MM]; // по умолчанию все ячейки 
+
     cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(status, d_status, MM * NN * sizeof(int), cudaMemcpyDeviceToHost);
 
@@ -870,10 +953,11 @@ void default_hard(const double* _data, const int* _status)
         res += data[i];
     cout << res << endl;
 
-#endif
-
     delete[] data;
     delete[] status;
+
+#endif
+
     cudaFree(d_data);
     cudaFree(d_status);
 
@@ -900,14 +984,14 @@ void csr(const double* _data, const int* _status)
     int nnz = 0;
 
 
-    double* val;
-    int* id;
-    int* pos;
+    double *val;
+    int *id;
+    int *pos;
 
-    double* d_val;
-    int* d_id;
-    int* d_pos;
-
+    double *d_val;
+    int *d_id;
+    int *d_pos;
+    int *d_status;
 
     for (int i = 0; i < size; i++) // самый простой тупой способ подсчета ненулевых частей
     {
@@ -945,10 +1029,12 @@ void csr(const double* _data, const int* _status)
     cudaMalloc((void**)&d_val, nnz * sizeof(double));
     cudaMalloc((void**)&d_id, nnz * sizeof(int));
     cudaMalloc((void**)&d_pos, MM * NN * sizeof(int) + 1); // по количеству ячеек в сетке
+    cudaMalloc((void**)&d_status, MM * NN * sizeof(int));
 
     cudaMemcpy(d_val, val, nnz * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_id, id, nnz * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_pos, pos, MM * NN * sizeof(double) + 1, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_id, id, nnz * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_pos, pos, MM * NN * sizeof(int) + 1, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_status, _status, MM * NN * sizeof(int), cudaMemcpyHostToDevice);
 
     //for (int i = 0; i < nnz; i++)
     //    cout << val[i] << " ";
@@ -968,106 +1054,78 @@ void csr(const double* _data, const int* _status)
     delete[] id;
     delete[] pos;
 
-    //convert_to_csr <<<1, 1>>> (d_data, d_val, d_id, d_pos); // чисто одно ядро делает конвертацию, конечно можно немного распараллелить, но нужно сделать доп вычисления
-    //cudaDeviceSynchronize();
+
+#ifdef TIMER
+    cudaEventRecord(start, 0);
+#endif
+
+    int count_blocks = ((NN * MM + LOAD_THREAD_CSR) / LOAD_THREAD_CSR + THREAD_IN_BLOCK) / THREAD_IN_BLOCK;
+    //cout << endl << endl << count_blocks << endl;
+    int *d_tmp_sum; // временный массив для хранения суммы дополнительной памяти для каждого блока
+    cudaMalloc((void**)&d_tmp_sum, count_blocks * sizeof(int));
+    int* d_sum;
+    cudaMalloc((void**)&d_sum, sizeof(int));
+
+    for (int i = 0; i < N_STEP; i++)
+    {
+        // преподсчет новых ячеек
+        csr_precount << <count_blocks, THREAD_IN_BLOCK >> > (d_status, d_tmp_sum);
+
+        // ядро, которое выдает окончательную цифру расширения памяти
+        csr_final_sum<<<1, 1024>>>(d_tmp_sum, d_sum, count_blocks);
+
+        int sum = 0;
+        cudaMemcpy(&sum, d_sum, sizeof(int), cudaMemcpyDeviceToHost);
+
+        //cout << sum << endl;
+
+        nnz += sum; // новая длина массивов val и id
+
+        // новая аллок для массивов val и id
+
+        // вычисление
+
+        // возможно нужен будет так же update
+        
+        //test_default_hard << < ((NN * MM + LOAD_THREAD_DEFAULT_HARD) / LOAD_THREAD_DEFAULT_HARD + THREAD_IN_BLOCK) / THREAD_IN_BLOCK, THREAD_IN_BLOCK >> > (d_data, d_status);
+        //test_update_default_hard << < ((NN * MM + LOAD_THREAD_DEFAULT_HARD) / LOAD_THREAD_DEFAULT_HARD + THREAD_IN_BLOCK) / THREAD_IN_BLOCK, THREAD_IN_BLOCK >> > (d_status);
+    }
+
+#ifdef TIMER
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    float elapsedTime;
+    cudaEventElapsedTime(&elapsedTime, start, stop);
+
+    cout << "DEFAULT HARD TIME = " << elapsedTime / 1000 << endl;
+#endif
+
+#ifdef TEST
+
+    //cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
+    //cudaMemcpy(status, d_status, MM * NN * sizeof(int), cudaMemcpyDeviceToHost);
+
+#ifdef PRINTER
+    //Printer(data, status);
+#endif
+
+    //double res = 0;
+    //for (int i = 0; i < size; i++)
+    //    res += data[i];
+    //cout << res << endl;
+
+#endif
 
 
-
-
-
-    // TODO HERE
-
-
-
-
-
-
-
-
-
-
-
-
+#ifdef TIMER
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+#endif
 
     cudaFree(d_val);
     cudaFree(d_id);
     cudaFree(d_pos);
 
-
-//    double* data; // храним все вещества в каждой ячейке по порядку
-//    data = new double[size];
-//
-//    int* status; // информация о том смешанная ячейка или нет
-//    status = new int[NN * MM]; // по умолчанию все ячейки 
-//
-//    // копирование из исходных данных
-//    for (int i = 0; i < size; i++)
-//    {
-//        data[i] = _data[i];
-//    }
-//
-//    for (int i = 0; i < NN * MM; i++)
-//    {
-//        status[i] = _status[i];
-//    }
-//
-//#ifdef PRINTER
-//    Printer(data, status);
-//#endif
-//
-//    double* d_data;
-//    int* d_status;
-//
-//    cudaMalloc((void**)&d_data, size * sizeof(double));
-//    cudaMalloc((void**)&d_status, MM * NN * sizeof(int));
-//
-//    cudaMemcpy(d_data, data, size * sizeof(double), cudaMemcpyHostToDevice);
-//    cudaMemcpy(d_status, status, MM * NN * sizeof(int), cudaMemcpyHostToDevice);
-//
-//#ifdef TIMER
-//    cudaEventRecord(start, 0);
-//#endif
-//
-//    for (int i = 0; i < N_STEP; i++)
-//    {
-//        test_default_hard << < ((NN * MM + LOAD_THREAD_DEFAULT_HARD) / LOAD_THREAD_DEFAULT_HARD + THREAD_IN_BLOCK) / THREAD_IN_BLOCK, THREAD_IN_BLOCK >> > (d_data, d_status);
-//        test_update_default_hard << < ((NN * MM + LOAD_THREAD_DEFAULT_HARD) / LOAD_THREAD_DEFAULT_HARD + THREAD_IN_BLOCK) / THREAD_IN_BLOCK, THREAD_IN_BLOCK >> > (d_status);
-//    }
-//
-//#ifdef TIMER
-//    cudaEventRecord(stop, 0);
-//    cudaEventSynchronize(stop);
-//    float elapsedTime;
-//    cudaEventElapsedTime(&elapsedTime, start, stop);
-//
-//    cout << "DEFAULT HARD TIME = " << elapsedTime / 1000 << endl;
-//#endif
-//
-//#ifdef TEST
-//
-//    cudaMemcpy(data, d_data, size * sizeof(double), cudaMemcpyDeviceToHost);
-//    cudaMemcpy(status, d_status, MM * NN * sizeof(int), cudaMemcpyDeviceToHost);
-//
-//#ifdef PRINTER
-//    Printer(data, status);
-//#endif
-//
-//    double res = 0;
-//    for (int i = 0; i < size; i++)
-//        res += data[i];
-//    cout << res << endl;
-//
-//#endif
-//
-//    delete[] data;
-//    delete[] status;
-//    cudaFree(d_data);
-//    cudaFree(d_status);
-//
-//#ifdef TIMER
-//    cudaEventDestroy(start);
-//    cudaEventDestroy(stop);
-//#endif
 }
 
 
